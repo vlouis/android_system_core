@@ -41,6 +41,7 @@
 #include <android-base/parseint.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <cutils/sockets.h>
 
 #if !defined(_WIN32)
 #include <signal.h>
@@ -188,8 +189,8 @@ static void help() {
         "     generate adb public/private key; private key stored in FILE,\n"
         "\n"
         "scripting:\n"
-        " wait-for[-TRANSPORT]-STATE\n"
-        "     wait for device to be in the given state\n"
+        " wait-for[-TRANSPORT]-STATE...\n"
+        "     wait for device to be in a given state\n"
         "     STATE: device, recovery, rescue, sideload, bootloader, or disconnect\n"
         "     TRANSPORT: usb, local, or any [default=any]\n"
         " get-state                print offline | bootloader | device\n"
@@ -838,6 +839,8 @@ static int adb_sideload_legacy(const char* filename, int in_fd, int size) {
 
 #define SIDELOAD_HOST_BLOCK_SIZE (CHUNK_SIZE)
 
+#define MB (1024*1024)
+
 // Connects to the sideload / rescue service on the device (served by minadbd) and sends over the
 // data in an OTA package.
 //
@@ -857,10 +860,19 @@ static int adb_sideload_legacy(const char* filename, int in_fd, int size) {
 //   the data transfer.
 //
 static int adb_sideload_install(const char* filename, bool rescue_mode) {
+    static const char spinner[] = "/-\\|";
+    static const int spinlen = sizeof(spinner)-1;
+    size_t last_xfer = 0;
+    int spin_index = 0;
     // TODO: use a LinePrinter instead...
     struct stat sb;
     if (stat(filename, &sb) == -1) {
         fprintf(stderr, "adb: failed to stat file %s: %s\n", filename, strerror(errno));
+        return -1;
+    }
+    if (sb.st_size == 0) {
+        printf("\n");
+        fprintf(stderr, "* '%s' is empty *\n", filename);
         return -1;
     }
     unique_fd package_fd(adb_open(filename, O_RDONLY));
@@ -896,8 +908,25 @@ static int adb_sideload_install(const char* filename, bool rescue_mode) {
     char buf[SIDELOAD_HOST_BLOCK_SIZE];
 
     int64_t xfer = 0;
-    int last_percent = -1;
     while (true) {
+        fd_set fds;
+        struct timeval tv;
+        FD_ZERO(&fds);
+        FD_SET(static_cast<cutils_socket_t>(device_fd), &fds);
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        int rc = select(device_fd+1, &fds, NULL, NULL, &tv);
+        size_t diff = xfer - last_xfer;
+        if (rc == 0 || diff >= (1*MB)) {
+            spin_index = (spin_index+1) % spinlen;
+            printf("\rserving: '%s' %4umb %.2fx %c", filename,
+                    (unsigned)xfer/(1*MB), (double)xfer/sb.st_size, spinner[spin_index]);
+            fflush(stdout);
+            last_xfer = xfer;
+        }
+        if (rc == 0) {
+            continue;
+        }
         if (!ReadFdExactly(device_fd, buf, 8)) {
             fprintf(stderr, "adb: failed to read command: %s\n", strerror(errno));
             return -1;
@@ -945,20 +974,9 @@ static int adb_sideload_install(const char* filename, bool rescue_mode) {
             return -1;
         }
         xfer += to_write;
-
-        // For normal OTA packages, we expect to transfer every byte
-        // twice, plus a bit of overhead (one read during
-        // verification, one read of each byte for installation, plus
-        // extra access to things like the zip central directory).
-        // This estimate of the completion becomes 100% when we've
-        // transferred ~2.13 (=100/47) times the package size.
-        int percent = static_cast<int>(xfer * 47LL / (sb.st_size ? sb.st_size : 1));
-        if (percent != last_percent) {
-            printf("\rserving: '%s'  (~%d%%)    ", filename, percent);
-            fflush(stdout);
-            last_percent = percent;
-        }
     }
+
+    printf("\ntotal xfer: %4umb %.2fx\n", (unsigned)xfer/(1*MB), (double)xfer/sb.st_size);
 }
 
 static int adb_wipe_devices() {
@@ -1045,17 +1063,16 @@ static int ppp(int argc, const char** argv) {
 static bool wait_for_device(const char* service,
                             std::optional<std::chrono::milliseconds> timeout = std::nullopt) {
     std::vector<std::string> components = android::base::Split(service, "-");
-    if (components.size() < 3 || components.size() > 4) {
+    if (components.size() < 3) {
         fprintf(stderr, "adb: couldn't parse 'wait-for' command: %s\n", service);
         return false;
     }
 
-    TransportType t;
-    adb_get_transport(&t, nullptr, nullptr);
-
-    // Was the caller vague about what they'd like us to wait for?
-    // If so, check they weren't more specific in their choice of transport type.
-    if (components.size() == 3) {
+    // If the first thing after "wait-for-" wasn't a TRANSPORT, insert whatever
+    // the current transport implies.
+    if (components[2] != "usb" && components[2] != "local" && components[2] != "any") {
+        TransportType t;
+        adb_get_transport(&t, nullptr, nullptr);
         auto it = components.begin() + 2;
         if (t == kTransportUsb) {
             components.insert(it, "usb");
@@ -1064,23 +1081,9 @@ static bool wait_for_device(const char* service,
         } else {
             components.insert(it, "any");
         }
-    } else if (components[2] != "any" && components[2] != "local" && components[2] != "usb") {
-        fprintf(stderr, "adb: unknown type %s; expected 'any', 'local', or 'usb'\n",
-                components[2].c_str());
-        return false;
     }
 
-    if (components[3] != "any" && components[3] != "bootloader" && components[3] != "device" &&
-        components[3] != "recovery" && components[3] != "rescue" && components[3] != "sideload" &&
-        components[3] != "disconnect") {
-        fprintf(stderr,
-                "adb: unknown state %s; "
-                "expected 'any', 'bootloader', 'device', 'recovery', 'rescue', 'sideload', or "
-                "'disconnect'\n",
-                components[3].c_str());
-        return false;
-    }
-
+    // Stitch it back together and send it over...
     std::string cmd = format_host_command(android::base::Join(components, "-").c_str());
     if (timeout) {
         std::thread([timeout]() {

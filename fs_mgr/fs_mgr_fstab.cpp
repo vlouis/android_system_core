@@ -32,6 +32,7 @@
 #include <android-base/parseint.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <blkid/blkid.h>
 #include <libgsi/libgsi.h>
 
 #include "fs_mgr_priv.h"
@@ -211,6 +212,7 @@ void ParseFsMgrFlags(const std::string& flags, FstabEntry* entry) {
         CheckFlag("first_stage_mount", first_stage_mount);
         CheckFlag("slotselect_other", slot_select_other);
         CheckFlag("fsverity", fs_verity);
+        CheckFlag("wrappedkey", wrapped_key);
 
 #undef CheckFlag
 
@@ -769,6 +771,28 @@ FstabEntry* GetEntryForMountPoint(Fstab* fstab, const std::string& path) {
     return nullptr;
 }
 
+FstabEntry* GetEntryForMountPointTryDetectFs(Fstab* fstab, const std::string& path) {
+    if (fstab == nullptr) {
+        return nullptr;
+    }
+    FstabEntry* found = GetEntryForMountPoint(fstab, path);
+    if (found == nullptr) {
+        return nullptr;
+    }
+
+    if (char* detected_fs_type = blkid_get_tag_value(nullptr, "TYPE", found->blk_device.c_str())) {
+        for (auto& entry : *fstab) {
+            if (entry.mount_point == path && entry.fs_type == detected_fs_type) {
+                found = &entry;
+                break;
+            }
+        }
+        free(detected_fs_type);
+    }
+
+    return found;
+}
+
 std::set<std::string> GetBootDevices() {
     // First check the kernel commandline, then try the device tree otherwise
     std::string dt_file_name = get_android_dt_dir() + "/boot_devices";
@@ -790,15 +814,16 @@ std::set<std::string> GetBootDevices() {
 
 FstabEntry BuildGsiSystemFstabEntry() {
     // .logical_partition_name is required to look up AVB Hashtree descriptors.
-    FstabEntry system = {
-            .blk_device = "system_gsi",
-            .mount_point = "/system",
-            .fs_type = "ext4",
-            .flags = MS_RDONLY,
-            .fs_options = "barrier=1",
-            // could add more keys separated by ':'.
-            .avb_keys = "/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey",
-            .logical_partition_name = "system"};
+    FstabEntry system = {.blk_device = "system_gsi",
+                         .mount_point = "/system",
+                         .fs_type = "ext4",
+                         .flags = MS_RDONLY,
+                         .fs_options = "barrier=1",
+                         // could add more keys separated by ':'.
+                         .avb_keys =
+                                 "/avb/q-gsi.avbpubkey:/avb/q-developer-gsi.avbpubkey:"
+                                 "/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey",
+                         .logical_partition_name = "system"};
     system.fs_mgr_flags.wait = true;
     system.fs_mgr_flags.logical = true;
     system.fs_mgr_flags.first_stage_mount = true;

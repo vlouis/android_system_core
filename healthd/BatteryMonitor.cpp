@@ -42,6 +42,8 @@
 
 #define POWER_SUPPLY_SUBSYSTEM "power_supply"
 #define POWER_SUPPLY_SYSFS_PATH "/sys/class/" POWER_SUPPLY_SUBSYSTEM
+#define SYSFS_BATTERY_CURRENT "/sys/class/power_supply/battery/current_now"
+#define SYSFS_BATTERY_VOLTAGE "/sys/class/power_supply/battery/voltage_now"
 #define FAKE_BATTERY_CAPACITY 42
 #define FAKE_BATTERY_TEMPERATURE 424
 #define MILLION 1.0e6
@@ -158,12 +160,14 @@ BatteryMonitor::PowerSupplyType BatteryMonitor::readPowerSupplyType(const String
             { "USB", ANDROID_POWER_SUPPLY_TYPE_USB },
             { "USB_DCP", ANDROID_POWER_SUPPLY_TYPE_AC },
             { "USB_HVDCP", ANDROID_POWER_SUPPLY_TYPE_AC },
+            { "USB_HVDCP_3", ANDROID_POWER_SUPPLY_TYPE_AC },
             { "USB_CDP", ANDROID_POWER_SUPPLY_TYPE_AC },
             { "USB_ACA", ANDROID_POWER_SUPPLY_TYPE_AC },
             { "USB_C", ANDROID_POWER_SUPPLY_TYPE_AC },
             { "USB_PD", ANDROID_POWER_SUPPLY_TYPE_AC },
             { "USB_PD_DRP", ANDROID_POWER_SUPPLY_TYPE_USB },
             { "Wireless", ANDROID_POWER_SUPPLY_TYPE_WIRELESS },
+            { "DASH", ANDROID_POWER_SUPPLY_TYPE_AC },
             { NULL, 0 },
     };
 
@@ -244,6 +248,40 @@ bool BatteryMonitor::update(void) {
 
     double MaxPower = 0;
 
+    // Rescan for the available charger types
+    std::unique_ptr<DIR, decltype(&closedir)> dir(opendir(POWER_SUPPLY_SYSFS_PATH), closedir);
+    if (dir == NULL) {
+        KLOG_ERROR(LOG_TAG, "Could not open %s\n", POWER_SUPPLY_SYSFS_PATH);
+    } else {
+        struct dirent* entry;
+        String8 path;
+
+        mChargerNames.clear();
+
+        while ((entry = readdir(dir.get()))) {
+            const char* name = entry->d_name;
+
+            if (!strcmp(name, ".") || !strcmp(name, ".."))
+                continue;
+
+            // Look for "type" file in each subdirectory
+            path.clear();
+            path.appendFormat("%s/%s/type", POWER_SUPPLY_SYSFS_PATH, name);
+            switch(BatteryMonitor::readPowerSupplyType(path)) {
+            case ANDROID_POWER_SUPPLY_TYPE_AC:
+            case ANDROID_POWER_SUPPLY_TYPE_USB:
+            case ANDROID_POWER_SUPPLY_TYPE_WIRELESS:
+                path.clear();
+                path.appendFormat("%s/%s/online", POWER_SUPPLY_SYSFS_PATH, name);
+                if (access(path.string(), R_OK) == 0)
+                    mChargerNames.add(String8(name));
+                break;
+            default:
+                break;
+            }
+        }
+    }
+
     for (size_t i = 0; i < mChargerNames.size(); i++) {
         String8 path;
         path.appendFormat("%s/%s/online", POWER_SUPPLY_SYSFS_PATH,
@@ -266,19 +304,18 @@ bool BatteryMonitor::update(void) {
                 KLOG_WARNING(LOG_TAG, "%s: Unknown power supply type\n",
                              mChargerNames[i].string());
             }
-            path.clear();
-            path.appendFormat("%s/%s/current_max", POWER_SUPPLY_SYSFS_PATH,
-                              mChargerNames[i].string());
-            int ChargingCurrent =
-                    (access(path.string(), R_OK) == 0) ? getIntField(path) : 0;
 
-            path.clear();
-            path.appendFormat("%s/%s/voltage_max", POWER_SUPPLY_SYSFS_PATH,
-                              mChargerNames[i].string());
+            int ChargingCurrent =
+                  (access(SYSFS_BATTERY_CURRENT, R_OK) == 0) ? abs(getIntField(String8(SYSFS_BATTERY_CURRENT))) : 0;
 
             int ChargingVoltage =
-                (access(path.string(), R_OK) == 0) ? getIntField(path) :
-                DEFAULT_VBUS_VOLTAGE;
+                  (access(SYSFS_BATTERY_VOLTAGE, R_OK) == 0) ? getIntField(String8(SYSFS_BATTERY_VOLTAGE)) :
+                   DEFAULT_VBUS_VOLTAGE;
+
+            // there are devices that have the file but with a value of 0
+            if (ChargingVoltage == 0) {
+                ChargingVoltage = DEFAULT_VBUS_VOLTAGE;
+            }
 
             double power = ((double)ChargingCurrent / MILLION) *
                            ((double)ChargingVoltage / MILLION);

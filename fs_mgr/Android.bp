@@ -85,6 +85,11 @@ cc_library {
             ],
         },
     },
+    target: {
+        recovery: {
+            cflags: ["-DSKIP_SET_BLK_RO"],
+        },
+    },
 }
 
 cc_library_static {
@@ -99,6 +104,10 @@ cc_library_static {
         "fs_mgr_fstab.cpp",
         "fs_mgr_boot_config.cpp",
         "fs_mgr_slotselect.cpp",
+    ],
+    whole_static_libs: [
+        "libext2_blkid",
+        "libext2_uuid",
     ],
     target: {
         darwin: {
