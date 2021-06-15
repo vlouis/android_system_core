@@ -1075,7 +1075,7 @@ static void ProcessKernelCmdline() {
 static void SetSafetyNetProps() {
     InitPropertySet("ro.boot.flash.locked", "1");
     InitPropertySet("ro.boot.verifiedbootstate", "green");
-    InitPropertySet("ro.boot.veritymode", "enforcing");
+    InitPropertySet("ro.boot.selinux", "enforcing");
     InitPropertySet("ro.boot.vbmeta.device_state", "locked");
     InitPropertySet("ro.boot.veritymode", "enforcing");
     InitPropertySet("ro.boot.warranty_bit", "0");
